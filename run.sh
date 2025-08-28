@@ -1,0 +1,1 @@
+go run main.go -db=db/test_db.sqlite -debug

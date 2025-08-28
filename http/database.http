@@ -1,0 +1,54 @@
+### get db info
+GET {{host}}/db/info
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+### list tables
+GET {{host}}/db/tables
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+### list views
+GET {{host}}/db/views
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+### list triggers
+GET {{host}}/db/triggers
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+### query
+POST {{host}}/db/query
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+{
+  "SQL": "select * from users",
+  "page": 1,
+  "size": 1000
+}
+
+### create table
+POST {{host}}/db/table
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+{
+  "tableName": "users2"
+}
+
+### drop table
+DELETE {{host}}/db/table/users2
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+### query and export
+POST {{host}}/db/export?type=csv
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+{
+  "sql": "select * from users"
+}
+

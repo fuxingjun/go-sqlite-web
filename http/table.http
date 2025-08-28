@@ -1,0 +1,84 @@
+### get table info
+GET {{host}}/table/users
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+### get table columns
+GET {{host}}/table/users/columns
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+### new table column
+POST {{host}}/table/users/columns
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+{
+  "name": "address3",
+  "type": "TEXT",
+  "notNull": false,
+  "default": "",
+  "pk": false
+}
+
+### delete table column
+DELETE {{host}}/table/users/columns/address2
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+### rename table column
+PUT {{host}}/table/users/columns/address3
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+"address2"
+
+### get table indexes
+GET {{host}}/table/users/indexes
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+### new table index
+POST {{host}}/table/users/indexes
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+{
+  "name": "idx_email",
+  "columns": ["email"],
+  "unique": true
+}
+
+### delete table index
+DELETE {{host}}/table/users/indexes/idx_email
+
+### get table data
+GET {{host}}/table/users/rows
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+### insert row
+POST {{host}}/table/users/row
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+{
+  "name": "admin",
+  "email": "bbbccc@admin.com",
+  "age": 18
+}
+
+### import rows csv/json
+# POST {{host}}/table/users/import?type=csv
+
+### export rows csv/json
+POST {{host}}/table/users/export
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+{
+  "columns": ["id", "name", "email"],
+  "page": 1,
+  "size": 1000,
+  "fileType": "json"
+}

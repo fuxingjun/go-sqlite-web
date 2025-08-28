@@ -1,0 +1,13 @@
+{
+  "rest-client.environmentVariables": {
+    "local": {
+      "host": "http://127.0.0.1:18808",
+      "apiKey": "zxczxczxczxc"
+    }
+  },
+  "cSpell.words": [
+    "AUTOINCREMENT",
+    "gofiber",
+    "seqno"
+  ]
+}
