@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"strings"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 var DB *sql.DB
@@ -15,7 +15,7 @@ func Connect(path string, readOnly bool) error {
 	if readOnly {
 		mode = "?mode=ro"
 	}
-	db, err := sql.Open("sqlite3", path+mode)
+	db, err := sql.Open("sqlite", path+mode)
 	if err != nil {
 		return err
 	}

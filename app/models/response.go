@@ -14,3 +14,7 @@ func OK(data any, msg string) *Response {
 func Err(msg string) *Response {
 	return &Response{Code: -1, Error: msg}
 }
+
+func ErrWithData(msg string, data any) *Response {
+	return &Response{Code: -1, Error: msg, Data: data}
+}

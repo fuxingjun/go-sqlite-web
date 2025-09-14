@@ -23,7 +23,7 @@ func TableRoute(router fiber.Router) {
 		}
 		info, err := services.GetTableInfo(tableName)
 		if err != nil {
-			return c.Status(500).JSON(models.Err("failed to get table info: " + err.Error()))
+			return c.JSON(models.Err("failed to get table info: " + err.Error()))
 		}
 		if len(info.Columns) == 0 {
 			return c.Status(404).JSON(models.Err("table not found or has no columns"))
@@ -36,7 +36,7 @@ func TableRoute(router fiber.Router) {
 		tableName := c.Params("tableName")
 		indexes, err := services.GetTableColumns(tableName)
 		if err != nil {
-			return c.Status(500).JSON(models.Err("failed to get table indexes: " + err.Error()))
+			return c.JSON(models.Err("failed to get table indexes: " + err.Error()))
 		}
 		return c.JSON(models.OK(indexes, "table columns retrieved successfully"))
 	})
@@ -53,7 +53,7 @@ func TableRoute(router fiber.Router) {
 		}
 		err := services.NewTableColumn(tableName, column)
 		if err != nil {
-			return c.Status(500).JSON(models.Err("failed to add column: " + err.Error()))
+			return c.JSON(models.Err("failed to add column: " + err.Error()))
 		}
 		return c.JSON(models.OK(nil, "column added successfully"))
 	})
@@ -63,7 +63,7 @@ func TableRoute(router fiber.Router) {
 		tableName := c.Params("tableName")
 		columnName := c.Params("columnName")
 		if err := services.DeleteTableColumn(tableName, columnName); err != nil {
-			return c.Status(500).JSON(models.Err("failed to delete column: " + err.Error()))
+			return c.JSON(models.Err("failed to delete column: " + err.Error()))
 		}
 		return c.JSON(models.OK(nil, "column deleted successfully"))
 	})
@@ -72,15 +72,17 @@ func TableRoute(router fiber.Router) {
 	group.Put("/:tableName/columns/:columnName", func(c *fiber.Ctx) error {
 		tableName := c.Params("tableName")
 		columnName := c.Params("columnName")
-		var newName string
-		if err := c.BodyParser(&newName); err != nil {
+		var body struct {
+			NewName string `json:"newName"`
+		}
+		if err := c.BodyParser(&body); err != nil {
 			return c.Status(400).JSON(models.Err("invalid JSON body: " + err.Error()))
 		}
-		if newName == "" {
+		if body.NewName == "" {
 			return c.Status(400).JSON(models.Err("new column name is required"))
 		}
-		if err := services.RenameTableColumn(tableName, columnName, newName); err != nil {
-			return c.Status(500).JSON(models.Err("failed to rename column: " + err.Error()))
+		if err := services.RenameTableColumn(tableName, columnName, body.NewName); err != nil {
+			return c.JSON(models.Err("failed to rename column: " + err.Error()))
 		}
 		return c.JSON(models.OK(nil, "column renamed successfully"))
 	})
@@ -90,7 +92,7 @@ func TableRoute(router fiber.Router) {
 		tableName := c.Params("tableName")
 		indexes, err := services.GetTableIndexes(tableName)
 		if err != nil {
-			return c.Status(500).JSON(models.Err("failed to get table indexes: " + err.Error()))
+			return c.JSON(models.Err("failed to get table indexes: " + err.Error()))
 		}
 		return c.JSON(models.OK(indexes, "table indexes retrieved successfully"))
 	})
@@ -107,7 +109,7 @@ func TableRoute(router fiber.Router) {
 		}
 		err := services.NewTableIndex(tableName, index)
 		if err != nil {
-			return c.Status(500).JSON(models.Err("failed to add index: " + err.Error()))
+			return c.JSON(models.Err("failed to add index: " + err.Error()))
 		}
 		return c.JSON(models.OK(nil, "index added successfully"))
 	})
@@ -117,7 +119,7 @@ func TableRoute(router fiber.Router) {
 		tableName := c.Params("tableName")
 		indexName := c.Params("indexName")
 		if err := services.DeleteTableIndex(tableName, indexName); err != nil {
-			return c.Status(500).JSON(models.Err("failed to delete index: " + err.Error()))
+			return c.JSON(models.Err("failed to delete index: " + err.Error()))
 		}
 		return c.JSON(models.OK(nil, "index deleted successfully"))
 	})
@@ -127,11 +129,17 @@ func TableRoute(router fiber.Router) {
 		tableName := c.Params("tableName")
 		page, _ := strconv.Atoi(c.Query("page", "1"))
 		limit, _ := strconv.Atoi(c.Query("limit", "50"))
+		if page <= 0 {
+			page = 1
+		}
+		if limit <= 0 {
+			limit = 50
+		}
 		offset := (page - 1) * limit
 
 		resp, err := services.GetTableData(tableName, limit, offset)
 		if err != nil {
-			return c.Status(500).JSON(models.Err("failed to get table data: " + err.Error()))
+			return c.JSON(models.Err("failed to get table data: " + err.Error()))
 		}
 
 		return c.JSON(models.OK(map[string]any{
@@ -152,11 +160,41 @@ func TableRoute(router fiber.Router) {
 		}
 		id, err := services.InsertRow(tableName, data)
 		if err != nil {
-			return c.Status(500).JSON(models.Err("insert failed: " + err.Error()))
+			return c.JSON(models.Err("insert failed: " + err.Error()))
 		}
 		return c.Status(201).JSON(models.OK(map[string]any{
 			"id": id,
 		}, "row inserted successfully"))
+	})
+
+	// 如果有主键, 支持修改数据
+	group.Put("/:tableName/row", func(c *fiber.Ctx) error {
+		tableName := c.Params("tableName")
+		var data map[string]any
+		if err := c.BodyParser(&data); err != nil {
+			return c.Status(400).JSON(models.Err("invalid JSON body: " + err.Error()))
+		}
+		res, err := services.UpdateRow(tableName, data)
+		if err != nil {
+			return c.JSON(models.Err("update failed: " + err.Error()))
+		}
+		return c.JSON(models.OK(map[string]any{
+			"rowsAffected": res,
+		}, "row updated successfully"))
+	})
+
+	// 如果有主键, 支持修改数据
+	group.Delete("/:tableName/row", func(c *fiber.Ctx) error {
+		tableName := c.Params("tableName")
+		// 获取所有查询参数作为 map[string]string
+		data := c.Queries()
+		res, err := services.DeleteRow(tableName, data)
+		if err != nil {
+			return c.JSON(models.Err("delete failed: " + err.Error()))
+		}
+		return c.JSON(models.OK(map[string]any{
+			"rowsAffected": res,
+		}, "row deleted successfully"))
 	})
 
 	// 上传导入数据
@@ -186,7 +224,7 @@ func TableRoute(router fiber.Router) {
 			})
 		}
 		defer fileReader.Close()
-		createNewColumn := c.FormValue("createNewColumn", "false") == "true"
+		createNewColumn := c.FormValue("createNewColumn", "true") != "false"
 		result, err := services.ImportToTable(
 			c.Context(),
 			fileReader,
@@ -195,14 +233,12 @@ func TableRoute(router fiber.Router) {
 			createNewColumn,
 		)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": err.Error(),
-			})
+			return c.JSON(models.ErrWithData(err.Error(), result))
 		}
 		return c.JSON(models.OK(result, "数据导入完成"))
 	})
 
-	// 导出表格数据//
+	// 导出表格数据
 	group.Post("/:tableName/export", func(c *fiber.Ctx) error {
 		tableName := c.Params("tableName")
 		if tableName == "" {
@@ -254,5 +290,4 @@ func TableRoute(router fiber.Router) {
 
 		return err // 如果导出函数返回 error，Fiber 会处理
 	})
-
 }

@@ -18,7 +18,8 @@ X-API-Key: {{apiKey}}
   "type": "TEXT",
   "notNull": false,
   "default": "",
-  "pk": false
+  "pk": false,
+  "autoIncrement": false
 }
 
 ### delete table column
@@ -31,7 +32,9 @@ PUT {{host}}/table/users/columns/address3
 Content-Type: application/json
 X-API-Key: {{apiKey}}
 
-"address2"
+{
+  "newName": "address22"
+}
 
 ### get table indexes
 GET {{host}}/table/users/indexes
@@ -68,8 +71,21 @@ X-API-Key: {{apiKey}}
   "age": 18
 }
 
-### import rows csv/json
-# POST {{host}}/table/users/import?type=csv
+### import rows csv/json file testFile/users.csv
+POST {{host}}/table/users/import
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
+X-API-Key: {{apiKey}}
+
+------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="createNewColumn"
+
+true
+------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="file"; filename="users.csv"
+Content-Type: text/csv
+
+< ./testFile/users.csv
+------WebKitFormBoundary7MA4YWxkTrZu0gW--
 
 ### export rows csv/json
 POST {{host}}/table/users/export

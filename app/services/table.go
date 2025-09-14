@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 
 	"github.com/fuxingjun/go-sqlite-web/app/models"
@@ -44,52 +45,151 @@ func GetTableInfo(tableName string) (*models.TableInfo, error) {
 	return detail, nil
 }
 
-// 查询表字段
+// GetTableColumns 获取表的列信息，包括 Unique 和 AutoIncrement
 func GetTableColumns(tableName string) ([]models.ColumnInfo, error) {
 	if !IsValidIdentifier(tableName) {
 		return nil, fmt.Errorf("invalid table name: %s", tableName)
 	}
-	query := fmt.Sprintf("PRAGMA table_info('%s')", tableName)
+
+	// Step 1: 获取表的 CREATE TABLE 语句（用于 AutoIncrement 判断）
+	createTableSQL, err := getTableDDL(tableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get table DDL: %w", err)
+	}
+
+	// Step 2: 使用 PRAGMA table_xinfo 获取列基本信息
+	query := fmt.Sprintf("PRAGMA table_xinfo('%s')", tableName)
 	rows, err := utils.DB.Query(query)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to query table_xinfo: %w", err)
 	}
 	defer rows.Close()
+
+	// Step 3: 获取 UNIQUE 列信息
+	uniqueColumns, err := getUniqueColumns(tableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get unique columns: %w", err)
+	}
+
 	var result []models.ColumnInfo
 	for rows.Next() {
 		var cid int
 		var name, colType, defaultValue sql.NullString
-		var notNull, pk int
-		err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk)
+		var notNull, pk, hidden int
+
+		// 正确扫描 7 个字段
+		err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk, &hidden)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
-		// 转换 NULL 值
+
 		defaultVal := ""
 		if defaultValue.Valid {
 			defaultVal = defaultValue.String
 		}
+
+		colName := name.String
+
+		// 判断是否为 AUTOINCREMENT
+		isAutoIncrement := isColumnAutoIncrement(colName, createTableSQL)
+
+		// 判断是否为 UNIQUE（包括主键）
+		isUnique := pk == 1 || uniqueColumns[colName]
+
 		result = append(result, models.ColumnInfo{
-			CID:     cid,
-			Name:    name.String,
-			Type:    colType.String,
-			NotNull: notNull == 1,
-			Default: defaultVal,
-			Primary: pk == 1,
+			CID:           cid,
+			Name:          colName,
+			Type:          colType.String,
+			Unique:        isUnique,
+			NotNull:       notNull == 1,
+			Default:       defaultVal,
+			Primary:       pk == 1,
+			AutoIncrement: isAutoIncrement,
 		})
 	}
+
 	if err = rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("row iteration error: %w", err)
 	}
+
 	return result, nil
 }
 
+// getUniqueColumns 返回表中所有被 UNIQUE 约束覆盖的列（单列 UNIQUE）
+func getUniqueColumns(tableName string) (map[string]bool, error) {
+	if !IsValidIdentifier(tableName) {
+		return nil, fmt.Errorf("invalid table name: %s", tableName)
+	}
+
+	uniqueCols := make(map[string]bool)
+
+	// 查询所有索引
+	indexListQuery := fmt.Sprintf("PRAGMA index_list('%s')", tableName)
+	rows, err := utils.DB.Query(indexListQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var seq, unique, partial int
+		var indexName, origin string
+		if err := rows.Scan(&seq, &indexName, &unique, &origin, &partial); err != nil {
+			return nil, err
+		}
+		if unique == 1 {
+			// 获取索引的列信息
+			cols, err := getIndexColumns(indexName)
+			if err != nil {
+				return nil, err
+			}
+			if len(cols) == 1 {
+				uniqueCols[cols[0]] = true
+			}
+		}
+	}
+
+	return uniqueCols, nil
+}
+
+// 获取表的 DDL 语句
+func getTableDDL(tableName string) (string, error) {
+	query := fmt.Sprintf("SELECT sql FROM sqlite_master WHERE type='table' AND name='%s'", tableName)
+	var ddl string
+	err := utils.DB.QueryRow(query).Scan(&ddl)
+	if err != nil {
+		return "", fmt.Errorf("failed to get table DDL: %w", err)
+	}
+	return ddl, nil
+}
+
+// 检查列是否为 AUTOINCREMENT
+func isColumnAutoIncrement(columnName, createTableSQL string) bool {
+	// 转换为大写进行比较
+	sqlUpper := strings.ToUpper(createTableSQL)
+	columnUpper := strings.ToUpper(columnName)
+
+	// 查找列定义
+	columnPattern := fmt.Sprintf(`\b%s\b[^,]*`, regexp.QuoteMeta(columnUpper))
+	re := regexp.MustCompile(columnPattern)
+
+	match := re.FindString(sqlUpper)
+	if match == "" {
+		return false
+	}
+
+	// 检查是否包含 AUTOINCREMENT 关键字
+	return strings.Contains(match, "AUTOINCREMENT") ||
+		strings.Contains(match, "AUTO_INCREMENT")
+}
+
 type NewTableColumnSchema struct {
-	Name    string `json:"name" validate:"required"`
-	Type    string `json:"type" validate:"required"`
-	NotNull bool   `json:"notNull"`
-	Default string `json:"default"`
-	Primary bool   `json:"pk"`
+	Name          string `json:"name" validate:"required"`
+	Type          string `json:"type" validate:"required"`
+	NotNull       bool   `json:"notNull"`
+	Default       string `json:"default,omitempty"`
+	Primary       bool   `json:"pk,omitempty"`
+	AutoIncrement bool   `json:"autoIncrement,omitempty"` // 允许不传, 默认 false
 }
 
 // 新建表字段
@@ -109,6 +209,9 @@ func NewTableColumn(tableName string, column NewTableColumnSchema) error {
 	}
 	if column.Primary {
 		sql += " PRIMARY KEY"
+		if column.AutoIncrement && strings.ToUpper(column.Type) == "INTEGER" {
+			sql += " AUTOINCREMENT"
+		}
 	}
 	_, err := utils.DB.Exec(sql)
 	return err
@@ -146,7 +249,7 @@ func GetTableIndexes(tableName string) ([]models.IndexInfo, error) {
 		return nil, fmt.Errorf("invalid table name: %s", tableName)
 	}
 
-	var indexes []models.IndexInfo
+	indexes := []models.IndexInfo{}
 
 	// Step 1: 获取索引列表（index_list）
 	indexListQuery := fmt.Sprintf("PRAGMA index_list('%s')", tableName)
@@ -277,7 +380,7 @@ func GetTableTriggers(tableName string) ([]models.TriggerInfo, error) {
 	}
 	defer rows.Close()
 
-	var triggers []models.TriggerInfo
+	triggers := []models.TriggerInfo{}
 	for rows.Next() {
 		var name, sql string
 		if err := rows.Scan(&name, &sql); err != nil {
@@ -326,6 +429,138 @@ func InsertRow(tableName string, data map[string]any) (int64, error) {
 	return result.LastInsertId()
 }
 
+// 如果有主键, 支持修改数据
+func UpdateRow(tableName string, data map[string]any) (int64, error) {
+	// 校验表名
+	if !IsValidIdentifier(tableName) {
+		return 0, fmt.Errorf("invalid table name: %s", tableName)
+	}
+	// 查询表字段
+	cols, err := GetTableColumns(tableName)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get table columns: %w", err)
+	}
+	if len(cols) == 0 {
+		return 0, fmt.Errorf("table '%s' not found or has no columns", tableName)
+	}
+	// 用主键 WHERE 限制
+	var pkCols []string
+	for _, col := range cols {
+		if col.Primary {
+			pkCols = append(pkCols, col.Name)
+		}
+	}
+	if len(pkCols) == 0 {
+		return 0, fmt.Errorf("table '%s' has no primary key, cannot update", tableName)
+	}
+	colMap := make(map[string]bool)
+	for _, col := range cols {
+		colMap[col.Name] = true
+	}
+	if len(data) == 0 {
+		return 0, fmt.Errorf("no data provided for update")
+	}
+	var sets []string
+	var args []any
+	for k, v := range data {
+		if !IsValidIdentifier(k) {
+			return 0, fmt.Errorf("invalid column name: %s", k)
+		}
+		if !colMap[k] {
+			return 0, fmt.Errorf("column '%s' does not exist in table '%s'", k, tableName)
+		}
+		sets = append(sets, fmt.Sprintf(`"%s" = ?`, k))
+		args = append(args, v)
+	}
+	if len(sets) == 0 {
+		return 0, fmt.Errorf("no valid columns to update")
+	}
+	sql := fmt.Sprintf(
+		"UPDATE \"%s\" SET %s",
+		tableName,
+		strings.Join(sets, ", "),
+	)
+	var where []string
+	for _, pk := range pkCols {
+		where = append(where, fmt.Sprintf(`"%s" = ?`, pk))
+		val, ok := data[pk]
+		if !ok {
+			return 0, fmt.Errorf("primary key column '%s' must be provided for update", pk)
+		}
+		args = append(args, val)
+	}
+	sql += " WHERE " + strings.Join(where, " AND ")
+	// 执行更新
+	result, err := utils.DB.Exec(sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// 如果有主键, 支持删除
+func DeleteRow(tableName string, data map[string]string) (int64, error) {
+	// 校验表名
+	if !IsValidIdentifier(tableName) {
+		return 0, fmt.Errorf("invalid table name: %s", tableName)
+	}
+	// 查询表字段
+	cols, err := GetTableColumns(tableName)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get table columns: %w", err)
+	}
+	if len(cols) == 0 {
+		return 0, fmt.Errorf("table '%s' not found or has no columns", tableName)
+	}
+	// 用主键 WHERE 限制
+	var pkCols []string
+	for _, col := range cols {
+		if col.Primary {
+			pkCols = append(pkCols, col.Name)
+		}
+	}
+	if len(pkCols) == 0 {
+		return 0, fmt.Errorf("table '%s' has no primary key, cannot delete", tableName)
+	}
+	colMap := make(map[string]bool)
+	for _, col := range cols {
+		colMap[col.Name] = true
+	}
+	if len(data) == 0 {
+		return 0, fmt.Errorf("no data provided for deletion")
+	}
+	var where []string
+	var args []any
+	for _, pk := range pkCols {
+		if !IsValidIdentifier(pk) {
+			return 0, fmt.Errorf("invalid column name: %s", pk)
+		}
+		if !colMap[pk] {
+			return 0, fmt.Errorf("column '%s' does not exist in table '%s'", pk, tableName)
+		}
+		where = append(where, fmt.Sprintf(`"%s" = ?`, pk))
+		val, ok := data[pk]
+		if !ok {
+			return 0, fmt.Errorf("primary key column '%s' must be provided for deletion", pk)
+		}
+		args = append(args, val)
+	}
+	if len(where) == 0 {
+		return 0, fmt.Errorf("no valid primary key columns for deletion")
+	}
+	sql := fmt.Sprintf(
+		"DELETE FROM \"%s\" WHERE %s",
+		tableName,
+		strings.Join(where, " AND "),
+	)
+	// 执行删除
+	result, err := utils.DB.Exec(sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 // IsValidIdentifier 检查标识符是否合法（简单实现）
 func IsValidIdentifier(s string) bool {
 	if s == "" {
@@ -367,6 +602,10 @@ func GetTableData(tableName string, limit, offset int) (*QueryTableResult, error
 	data, err := scanRows(rows)
 	if err != nil {
 		return nil, err
+	}
+
+	if data == nil {
+		data = []map[string]any{}
 	}
 
 	return &QueryTableResult{Data: data, Total: total}, nil
@@ -512,6 +751,8 @@ func ImportToTable(ctx context.Context, fileReader io.Reader, fileType, tableNam
 	// INSERT INTO table (a,b,c) VALUES (?, ?, ?)
 	placeholders := strings.Repeat("?,", len(columns)-1) + "?"
 	sqlStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", tableName, strings.Join(columns, ","), placeholders)
+	// 先尝试所有 INSERT，记录失败
+	var failed bool
 	for _, record := range records {
 		values := make([]any, 0, len(columns))
 		for _, col := range columns {
@@ -521,17 +762,29 @@ func ImportToTable(ctx context.Context, fileReader io.Reader, fileType, tableNam
 		if err != nil {
 			result.FailedCount++
 			result.Errors = append(result.Errors, err.Error())
+			failed = true
 		} else {
 			result.SuccessCount++
 		}
 	}
+
 	// 只有全部成功才提交
-	if result.FailedCount == 0 {
+	if !failed {
 		if err := tx.Commit(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("commit failed: %w", err)
 		}
+		return result, nil
+	}
+
+	// 显式回滚（虽然 defer 也会做，但更清晰）
+	if err := tx.Rollback(); err != nil {
+		// 可选：记录 rollback 错误
+	}
+	if failed {
+		return result, fmt.Errorf("部分数据导入失败，已回滚")
 	}
 	return result, nil
+
 }
 
 // 导出表数据, 支持指定字段, 格式 JSON/CSV

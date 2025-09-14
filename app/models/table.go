@@ -10,7 +10,7 @@ type TableColumn struct {
 	Name    string  `json:"name" validate:"required"`
 	Type    string  `json:"type" validate:"required,oneof=TEXT INTEGER REAL BLOB"` // 白名单类型
 	Primary bool    `json:"primary,omitempty"`
-	NotNull bool    `json:"not_null,omitempty"`
+	NotNull bool    `json:"notNull,omitempty"`
 	Unique  bool    `json:"unique,omitempty"`
 	Default *string `json:"default,omitempty"` // 支持 NULL 默认值
 }
@@ -39,12 +39,14 @@ type TriggerInfo struct {
 
 // ColumnInfo 表示一张表的结构信息
 type ColumnInfo struct {
-	CID     int    `json:"cid"`      // 列 ID（从 0 开始）
-	Name    string `json:"name"`     // 列名
-	Type    string `json:"type"`     // 数据类型
-	NotNull bool   `json:"not_null"` // 是否非空
-	Default string `json:"default"`  // 默认值（字符串形式）
-	Primary bool   `json:"primary"`  // 是否为主键
+	CID           int    `json:"cid"`           // 列 ID（从 0 开始）
+	Name          string `json:"name"`          // 列名
+	Type          string `json:"type"`          // 数据类型
+	Unique        bool   `json:"unique"`        // 是否唯一
+	NotNull       bool   `json:"notNull"`       // 是否非空
+	Default       string `json:"default"`       // 默认值（字符串形式）
+	Primary       bool   `json:"primary"`       // 是否为主键
+	AutoIncrement bool   `json:"autoIncrement"` // 是否为自增
 }
 
 // 导出表格数据参数
