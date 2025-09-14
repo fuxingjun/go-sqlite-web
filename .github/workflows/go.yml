@@ -21,10 +21,11 @@ jobs:
       with:
         node-version: '22' # 或 '20'，推荐长期支持版本
         cache: 'npm'       # 缓存 npm 依赖
+        cache-dependency-path: vue3-sqlite-web/package-lock.json
     - name: Install frontend dependencies
       run: |
         cd vue3-sqlite-web
-        npm install
+        npm ci
     - name: Build frontend
       run: |
         cd vue3-sqlite-web
