@@ -13,15 +13,23 @@
     "lint": "eslint . --fix"
   },
   "dependencies": {
+    "ace-builds": "^1.43.3",
+    "less": "^4.4.1",
     "vue": "^3.5.18",
-    "vue-router": "^4.5.1"
+    "vue-router": "^4.5.1",
+    "vue3-ace-editor": "^2.2.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.31.0",
+    "@vicons/ionicons5": "^0.13.0",
     "@vitejs/plugin-vue": "^6.0.1",
     "eslint": "^9.31.0",
     "eslint-plugin-vue": "~10.3.0",
     "globals": "^16.3.0",
+    "naive-ui": "^2.42.0",
+    "unplugin-auto-import": "^20.1.0",
+    "unplugin-vue-components": "^29.0.0",
+    "vfonts": "^0.0.3",
     "vite": "^7.0.6",
     "vite-plugin-vue-devtools": "^8.0.0"
   }

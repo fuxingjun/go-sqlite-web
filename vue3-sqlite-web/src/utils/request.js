@@ -1,4 +1,5 @@
-import { tokenStore, naiveApi } from "@/stores/common.js";
+import { tokenStore } from "@/stores/common.js";
+import { message } from "@/utils/message.js";
 
 function objToQueryString(obj) {
   const searchParams = new URLSearchParams();
@@ -60,8 +61,9 @@ class Request {
         throw new Error(response.statusText);
       } else {
         data = await response.json();
-        if (data.code != 0) {
-          throw new Error(data.message);
+        if (data.code !== 0) {
+          !options.quite && message?.error(data.message || data.error);
+          return Promise.reject(data);
         }
         return data;
       }
@@ -71,13 +73,13 @@ class Request {
       if (error.name === 'AbortError') {
         // throw new Error(`请求超时 (${timeout}ms)`)
         if (!options.quite) {
-          naiveApi.message?.error("请求超时");
+          message?.error("request timeout");
         }
         throw new Error("timeout");
       }
 
       if (!options.quite) {
-        naiveApi.message?.error(error.message || "请求失败");
+        message?.error(error.message || "request failed");
       }
       throw error;
     }
@@ -141,19 +143,21 @@ class Request {
       if (!response.ok) {
         throw new Error(response.statusText);
       } else {
+        // 从响应头取文件名称
+        const filename = response.headers.get('Content-Disposition').match(/filename="(.+)"/)[1];
         // 返回文件流
-        return await response.blob();
+        return [await response.blob(), filename];
       }
     } catch (error) {
       clearTimeout(this.timeoutId);
       if (error.name === 'AbortError') {
         if (!options?.quite) {
-          naiveApi.message?.error("请求超时");
+          message?.error("request timeout");
         }
         throw new Error("timeout");
       }
       if (!options?.quite) {
-        naiveApi.message?.error(error.message || "请求失败");
+        message?.error(error.message || "request failed");
       }
       throw error;
     }
