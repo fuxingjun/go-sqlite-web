@@ -37,7 +37,13 @@ func setupStatic(app *fiber.App) {
 	}))
 }
 
+var (
+	version = "dev"
+	date    = "unknown"
+)
+
 func main() {
+	fmt.Printf("version: %s, build time: %s\n", version, date)
 
 	db := flag.String("db", "db/test_db.sqlite", "SQLite database file")
 	host := flag.String("host", "127.0.0.1", "Server host")
