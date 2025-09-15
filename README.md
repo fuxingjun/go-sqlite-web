@@ -19,3 +19,10 @@ go_sqlite_web_windows_amd64.exe -db test.sqlite -port 12249 -debug
 - [ ] 权限认证
 - [ ] readonly 模式
 - [ ] 跨平台测试
+
+### 截图展示
+![image](./docs/images/index.png)
+![image](./docs/images/tableData.png)
+![image](./docs/images/tableColumns.png)
+![image](./docs/images/tableIndexs.png)
+![image](./docs/images/query.png)
