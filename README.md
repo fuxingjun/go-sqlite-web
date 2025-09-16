@@ -8,7 +8,7 @@
 # 查看帮助
 go_sqlite_web_windows_amd64.exe -h
 
-# 运行程序, 监听 10049 端口, 数据库文件为当前目录下的 db/test.sqlite, 也是不带任何参数的默认行为
+# 运行程序, 监听 12249 端口, 数据库文件为当前目录下的 db/test.sqlite, 也是不带任何参数的默认行为
 go_sqlite_web_windows_amd64.exe -db db/test.sqlite -port 12249
 
 # 运行程序, 开启调试模式, 会输出更多日志
