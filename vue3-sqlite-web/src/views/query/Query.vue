@@ -97,7 +97,13 @@ function getTableData() {
     feedback.value = data.error || data.message
     executeSuccess.value = res.code === 0 && !data.error
     if (data.columns && data.rows) {
-      columns.value = data.columns.map(col => ({ title: col, key: col }))
+      columns.value = data.columns.map(col => ({
+        title: col, key: col,
+        ellipsis: {
+          tooltip: true,
+        },
+        resizable: true,
+      }))
       tableData.value = data.rows
       pagination.itemCount = data.total
       pagination.page = data.page

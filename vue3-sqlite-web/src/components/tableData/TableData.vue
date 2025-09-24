@@ -39,7 +39,7 @@
         Export
       </n-button>
     </div>
-    <n-data-table :columns="computeColumns" :data="tableData" :pagination="pagination" :loading="tableLoading" :bordered="true" remote max-height="calc(100vh - 210px)" />
+    <n-data-table :columns="computeColumns" :data="tableData" :pagination="pagination" :loading="tableLoading" :bordered="true" resizable remote max-height="calc(100vh - 210px)" />
 
     <NewRowModal ref="newRowModalRef" @confirm="getTableData" />
 
@@ -140,6 +140,11 @@ function getTableData() {
           primary: item.primary,
           autoIncrement: item.autoIncrement,
           type: item.type,
+          width: item.type === "TIMESTAMP" ? 240 : 180,
+          ellipsis: {
+            tooltip: true,
+          },
+          resizable: true,
         }
       });
     }
