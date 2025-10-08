@@ -71,6 +71,18 @@ X-API-Key: {{apiKey}}
   "age": 18
 }
 
+### update row
+PUT {{host}}/table/users/row
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+{
+  "id": 1,
+  "name": "admin",
+  "email": "bbbccc@admin.com",
+  "age": 19
+}
+
 ### import rows csv/json file testFile/users.csv
 POST {{host}}/table/users/import
 Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
@@ -96,5 +108,5 @@ X-API-Key: {{apiKey}}
   "columns": ["id", "name", "email"],
   "page": 1,
   "size": 1000,
-  "fileType": "json"
+  "fileType": "csv"
 }

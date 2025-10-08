@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/fuxingjun/go-sqlite-web/app/models"
 	"github.com/fuxingjun/go-sqlite-web/app/utils"
 	"github.com/gofiber/fiber/v2"
+	"github.com/jmoiron/sqlx"
 )
 
 // GetTableDetail 获取表的完整结构：字段 + 索引 + 触发器
@@ -45,21 +47,32 @@ func GetTableInfo(tableName string) (*models.TableInfo, error) {
 	return detail, nil
 }
 
+type columnPragma struct {
+	CID          int            `db:"cid"`
+	Name         string         `db:"name"`
+	Type         string         `db:"type"`
+	NotNull      int            `db:"notnull"`
+	DefaultValue sql.NullString `db:"dflt_value"`
+	PK           int            `db:"pk"`
+	Hidden       int            `db:"hidden"`
+}
+
 // GetTableColumns 获取表的列信息，包括 Unique 和 AutoIncrement
 func GetTableColumns(tableName string) ([]models.ColumnInfo, error) {
 	if !IsValidIdentifier(tableName) {
 		return nil, fmt.Errorf("invalid table name: %s", tableName)
 	}
 
-	// Step 1: 获取表的 CREATE TABLE 语句（用于 AutoIncrement 判断）
-	createTableSQL, err := getTableDDL(tableName)
+	// Step 1: 获取表的 CREATE TABLE 语句
+	var ddl string
+	err := utils.DB.Get(&ddl, "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", tableName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get table DDL: %w", err)
 	}
 
 	// Step 2: 使用 PRAGMA table_xinfo 获取列基本信息
 	query := fmt.Sprintf("PRAGMA table_xinfo('%s')", tableName)
-	rows, err := utils.DB.Query(query)
+	rows, err := utils.DB.Queryx(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query table_xinfo: %w", err)
 	}
@@ -73,37 +86,30 @@ func GetTableColumns(tableName string) ([]models.ColumnInfo, error) {
 
 	var result []models.ColumnInfo
 	for rows.Next() {
-		var cid int
-		var name, colType, defaultValue sql.NullString
-		var notNull, pk, hidden int
-
-		// 正确扫描 7 个字段
-		err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk, &hidden)
-		if err != nil {
+		var col columnPragma
+		if err := rows.StructScan(&col); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
 		defaultVal := ""
-		if defaultValue.Valid {
-			defaultVal = defaultValue.String
+		if col.DefaultValue.Valid {
+			defaultVal = col.DefaultValue.String
 		}
 
-		colName := name.String
-
 		// 判断是否为 AUTOINCREMENT
-		isAutoIncrement := isColumnAutoIncrement(colName, createTableSQL)
+		isAutoIncrement := isColumnAutoIncrement(col.Name, ddl)
 
 		// 判断是否为 UNIQUE（包括主键）
-		isUnique := pk == 1 || uniqueColumns[colName]
+		isUnique := col.PK == 1 || uniqueColumns[col.Name]
 
 		result = append(result, models.ColumnInfo{
-			CID:           cid,
-			Name:          colName,
-			Type:          colType.String,
+			CID:           col.CID,
+			Name:          col.Name,
+			Type:          col.Type,
 			Unique:        isUnique,
-			NotNull:       notNull == 1,
+			NotNull:       col.NotNull == 1,
 			Default:       defaultVal,
-			Primary:       pk == 1,
+			Primary:       col.PK == 1,
 			AutoIncrement: isAutoIncrement,
 		})
 	}
@@ -124,22 +130,15 @@ func getUniqueColumns(tableName string) (map[string]bool, error) {
 	uniqueCols := make(map[string]bool)
 
 	// 查询所有索引
-	indexListQuery := fmt.Sprintf("PRAGMA index_list('%s')", tableName)
-	rows, err := utils.DB.Query(indexListQuery)
+	tableIndexes, err := GetTableIndexes(tableName)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	for rows.Next() {
-		var seq, unique, partial int
-		var indexName, origin string
-		if err := rows.Scan(&seq, &indexName, &unique, &origin, &partial); err != nil {
-			return nil, err
-		}
-		if unique == 1 {
+	for _, index := range tableIndexes {
+		if index.Unique {
 			// 获取索引的列信息
-			cols, err := getIndexColumns(indexName)
+			cols, err := getIndexColumns(index.Name)
 			if err != nil {
 				return nil, err
 			}
@@ -150,17 +149,6 @@ func getUniqueColumns(tableName string) (map[string]bool, error) {
 	}
 
 	return uniqueCols, nil
-}
-
-// 获取表的 DDL 语句
-func getTableDDL(tableName string) (string, error) {
-	query := fmt.Sprintf("SELECT sql FROM sqlite_master WHERE type='table' AND name='%s'", tableName)
-	var ddl string
-	err := utils.DB.QueryRow(query).Scan(&ddl)
-	if err != nil {
-		return "", fmt.Errorf("failed to get table DDL: %w", err)
-	}
-	return ddl, nil
 }
 
 // 检查列是否为 AUTOINCREMENT
@@ -179,8 +167,7 @@ func isColumnAutoIncrement(columnName, createTableSQL string) bool {
 	}
 
 	// 检查是否包含 AUTOINCREMENT 关键字
-	return strings.Contains(match, "AUTOINCREMENT") ||
-		strings.Contains(match, "AUTO_INCREMENT")
+	return strings.Contains(match, "AUTOINCREMENT") || strings.Contains(match, "AUTO_INCREMENT")
 }
 
 type NewTableColumnSchema struct {
@@ -243,49 +230,52 @@ func RenameTableColumn(tableName, oldName, newName string) error {
 	return err
 }
 
+// indexListPragma 用于映射 PRAGMA index_list 返回的数据
+type indexListPragma struct {
+	Seq     int    `db:"seq"`
+	Name    string `db:"name"`
+	Unique  int    `db:"unique"`
+	Origin  string `db:"origin"`
+	Partial int    `db:"partial"`
+}
+
 // GetTableIndexes 获取指定表的所有索引及其列信息
 func GetTableIndexes(tableName string) ([]models.IndexInfo, error) {
 	if !IsValidIdentifier(tableName) {
 		return nil, fmt.Errorf("invalid table name: %s", tableName)
 	}
 
-	indexes := []models.IndexInfo{}
-
 	// Step 1: 获取索引列表（index_list）
-	indexListQuery := fmt.Sprintf("PRAGMA index_list('%s')", tableName)
-	rows, err := utils.DB.Query(indexListQuery)
-	if err != nil {
-		return nil, err
+	query := fmt.Sprintf("PRAGMA index_list('%s')", tableName)
+	var pragmas []indexListPragma
+	if err := utils.DB.Select(&pragmas, query); err != nil {
+		return nil, fmt.Errorf("failed to get index list: %w", err)
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var seq, unique, partial int
-		var indexName, origin string
-		if err := rows.Scan(&seq, &indexName, &unique, &origin, &partial); err != nil {
-			return nil, err
-		}
-		// ✅ 安全读取可能为 NULL 的 sql 字段
+	indexes := make([]models.IndexInfo, 0, len(pragmas))
+	for _, p := range pragmas {
+		// 获取索引的 SQL
 		var sqlNull sql.NullString
-		err := utils.DB.QueryRow("SELECT sql FROM sqlite_master WHERE type='index' AND name=?", indexName).Scan(&sqlNull)
+		err := utils.DB.Get(&sqlNull, "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", p.Name)
+
 		var indexSQL string
 		if err == nil && sqlNull.Valid {
 			indexSQL = sqlNull.String
-		} else {
-			// 索引无 SQL（如主键或唯一约束自动生成的索引）
-			indexSQL = ""
 		}
-		columns, err := getIndexColumns(indexName)
+
+		// 获取索引的列
+		columns, err := getIndexColumns(p.Name)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to get columns for index %s: %w", p.Name, err)
 		}
+
 		indexes = append(indexes, models.IndexInfo{
-			Name:    indexName,
-			Unique:  unique == 1,
+			Name:    p.Name,
+			Unique:  p.Unique == 1,
 			SQL:     indexSQL,
 			Columns: columns,
 		})
 	}
+
 	return indexes, nil
 }
 
@@ -330,6 +320,13 @@ func DeleteTableIndex(tableName, indexName string) error {
 	return err
 }
 
+// indexInfoPragma 用于映射 PRAGMA index_info 返回的数据
+type indexInfoPragma struct {
+	SeqNo      int    `db:"seqno"`
+	Cid        int    `db:"cid"`
+	ColumnName string `db:"name"`
+}
+
 // getIndexColumns 获取某个索引包含的列名
 func getIndexColumns(indexName string) ([]string, error) {
 	if !IsValidIdentifier(indexName) {
@@ -337,27 +334,24 @@ func getIndexColumns(indexName string) ([]string, error) {
 	}
 
 	query := fmt.Sprintf("PRAGMA index_info('%s')", indexName)
-	rows, err := utils.DB.Query(query)
-	if err != nil {
-		return nil, err
+	var pragmas []indexInfoPragma
+	if err := utils.DB.Select(&pragmas, query); err != nil {
+		return nil, fmt.Errorf("failed to get index info: %w", err)
 	}
-	defer rows.Close()
 
-	var columns []string
-	for rows.Next() {
-		var seqNo, cid int
-		var columnName string
-
-		// index_info 返回：seqno, cid, name
-		err := rows.Scan(&seqNo, &cid, &columnName)
-		if err != nil {
-			return nil, err
-		}
-
-		columns = append(columns, columnName)
+	// 提取列名
+	columns := make([]string, len(pragmas))
+	for i, p := range pragmas {
+		columns[i] = p.ColumnName
 	}
 
 	return columns, nil
+}
+
+// triggerSchema 用于映射 sqlite_master 表中的触发器数据
+type triggerSchema struct {
+	Name string `db:"name"`
+	SQL  string `db:"sql"`
 }
 
 // GetTableTriggers 获取指定表的所有触发器
@@ -367,33 +361,28 @@ func GetTableTriggers(tableName string) ([]models.TriggerInfo, error) {
 	}
 
 	query := `
-        SELECT name, sql 
-        FROM sqlite_master 
-        WHERE type = 'trigger' 
-          AND tbl_name = ? 
-        ORDER BY name
-    `
+			SELECT name, sql 
+			FROM sqlite_master 
+			WHERE type = 'trigger' 
+				AND tbl_name = ? 
+			ORDER BY name
+	`
 
-	rows, err := utils.DB.Query(query, tableName)
-	if err != nil {
-		return nil, err
+	var triggers []triggerSchema
+	if err := utils.DB.Select(&triggers, query, tableName); err != nil {
+		return nil, fmt.Errorf("failed to get triggers: %w", err)
 	}
-	defer rows.Close()
 
-	triggers := []models.TriggerInfo{}
-	for rows.Next() {
-		var name, sql string
-		if err := rows.Scan(&name, &sql); err != nil {
-			return nil, err
+	// 转换为业务模型
+	result := make([]models.TriggerInfo, len(triggers))
+	for i, t := range triggers {
+		result[i] = models.TriggerInfo{
+			Name: t.Name,
+			SQL:  t.SQL,
 		}
-
-		triggers = append(triggers, models.TriggerInfo{
-			Name: name,
-			SQL:  sql,
-		})
 	}
 
-	return triggers, nil
+	return result, nil
 }
 
 // InsertRow 向指定表插入一行数据
@@ -405,28 +394,55 @@ func InsertRow(tableName string, data map[string]any) (int64, error) {
 	if len(data) == 0 {
 		return 0, fmt.Errorf("no data provided for insertion")
 	}
-	var columns []string
-	var placeholders []string
-	var args []any
+	// 2. 验证列是否存在
+	cols, err := GetTableColumns(tableName)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get table columns: %w", err)
+	}
+	columnMap := make(map[string]models.ColumnInfo)
+	for _, col := range cols {
+		columnMap[col.Name] = col
+	}
+
+	columns := make([]string, 0, len(data))
+	values := make([]string, 0, len(data))
+	params := make(map[string]any)
 	for k, v := range data {
 		if !IsValidIdentifier(k) {
 			return 0, fmt.Errorf("invalid column name: %s", k)
 		}
+		// 检查列是否存在
+		if _, exists := columnMap[k]; !exists {
+			return 0, fmt.Errorf("column not found: %s", k)
+		}
+
+		// 处理 nil 值
+		if v == nil && columnMap[k].NotNull {
+			return 0, fmt.Errorf("column %s cannot be null", k)
+		}
 		columns = append(columns, fmt.Sprintf(`"%s"`, k))
-		placeholders = append(placeholders, "?")
-		args = append(args, v)
+		values = append(values, ":"+k)
+		params[k] = v
 	}
-	sql := fmt.Sprintf(
-		"INSERT INTO \"%s\" (%s) VALUES (%s)",
+	// 4. 执行 SQL
+	query := fmt.Sprintf(
+		`INSERT INTO "%s" (%s) VALUES (%s)`,
 		tableName,
 		strings.Join(columns, ", "),
-		strings.Join(placeholders, ", "),
+		strings.Join(values, ", "),
 	)
-	result, err := utils.DB.Exec(sql, args...)
+
+	result, err := utils.DB.NamedExec(query, params)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to insert row: %w", err)
 	}
-	return result.LastInsertId()
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get last insert id: %w", err)
+	}
+
+	return id, nil
 }
 
 // 如果有主键, 支持修改数据
@@ -435,17 +451,19 @@ func UpdateRow(tableName string, data map[string]any) (int64, error) {
 	if !IsValidIdentifier(tableName) {
 		return 0, fmt.Errorf("invalid table name: %s", tableName)
 	}
+	if len(data) == 0 {
+		return 0, fmt.Errorf("no data provided for update")
+	}
 	// 查询表字段
 	cols, err := GetTableColumns(tableName)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get table columns: %w", err)
 	}
-	if len(cols) == 0 {
-		return 0, fmt.Errorf("table '%s' not found or has no columns", tableName)
-	}
 	// 用主键 WHERE 限制
 	var pkCols []string
+	colMap := make(map[string]models.ColumnInfo)
 	for _, col := range cols {
+		colMap[col.Name] = col
 		if col.Primary {
 			pkCols = append(pkCols, col.Name)
 		}
@@ -453,49 +471,58 @@ func UpdateRow(tableName string, data map[string]any) (int64, error) {
 	if len(pkCols) == 0 {
 		return 0, fmt.Errorf("table '%s' has no primary key, cannot update", tableName)
 	}
-	colMap := make(map[string]bool)
-	for _, col := range cols {
-		colMap[col.Name] = true
-	}
-	if len(data) == 0 {
-		return 0, fmt.Errorf("no data provided for update")
-	}
-	var sets []string
-	var args []any
-	for k, v := range data {
+	// 4. 验证数据
+	for k := range data {
 		if !IsValidIdentifier(k) {
 			return 0, fmt.Errorf("invalid column name: %s", k)
 		}
-		if !colMap[k] {
-			return 0, fmt.Errorf("column '%s' does not exist in table '%s'", k, tableName)
+		if _, exists := colMap[k]; !exists {
+			return 0, fmt.Errorf("column '%s' does not exist", k)
 		}
-		sets = append(sets, fmt.Sprintf(`"%s" = ?`, k))
-		args = append(args, v)
 	}
-	if len(sets) == 0 {
-		return 0, fmt.Errorf("no valid columns to update")
+
+	// 5. 构建 UPDATE 语句
+	var sets []string
+	params := make(map[string]any)
+	for k, v := range data {
+		if _, exists := colMap[k]; exists {
+			if !isPrimaryKey(k, pkCols) {
+				sets = append(sets, fmt.Sprintf(`"%s" = :set_%s`, k, k))
+				params["set_"+k] = v
+			}
+		}
 	}
-	sql := fmt.Sprintf(
-		"UPDATE \"%s\" SET %s",
-		tableName,
-		strings.Join(sets, ", "),
-	)
+	// 构建 WHERE 子句
 	var where []string
 	for _, pk := range pkCols {
-		where = append(where, fmt.Sprintf(`"%s" = ?`, pk))
 		val, ok := data[pk]
 		if !ok {
-			return 0, fmt.Errorf("primary key column '%s' must be provided for update", pk)
+			return 0, fmt.Errorf("primary key column '%s' must be provided", pk)
 		}
-		args = append(args, val)
+		where = append(where, fmt.Sprintf(`"%s" = :where_%s`, pk, pk))
+		params["where_"+pk] = val
 	}
-	sql += " WHERE " + strings.Join(where, " AND ")
-	// 执行更新
-	result, err := utils.DB.Exec(sql, args...)
+	if len(sets) == 0 {
+		return 0, fmt.Errorf("no columns to update")
+	}
+	// 6. 执行更新
+	query := fmt.Sprintf(
+		`UPDATE "%s" SET %s WHERE %s`,
+		tableName,
+		strings.Join(sets, ", "),
+		strings.Join(where, " AND "),
+	)
+	result, err := utils.DB.NamedExec(query, params)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to execute update: %w", err)
 	}
+
 	return result.RowsAffected()
+}
+
+// 辅助函数：判断是否为主键列
+func isPrimaryKey(colName string, pkCols []string) bool {
+	return slices.Contains(pkCols, colName)
 }
 
 // 如果有主键, 支持删除
@@ -504,17 +531,19 @@ func DeleteRow(tableName string, data map[string]string) (int64, error) {
 	if !IsValidIdentifier(tableName) {
 		return 0, fmt.Errorf("invalid table name: %s", tableName)
 	}
+	if len(data) == 0 {
+		return 0, fmt.Errorf("no data provided for deletion")
+	}
 	// 查询表字段
 	cols, err := GetTableColumns(tableName)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get table columns: %w", err)
 	}
-	if len(cols) == 0 {
-		return 0, fmt.Errorf("table '%s' not found or has no columns", tableName)
-	}
-	// 用主键 WHERE 限制
+	// 3. 找出主键列
 	var pkCols []string
+	colMap := make(map[string]bool)
 	for _, col := range cols {
+		colMap[col.Name] = true
 		if col.Primary {
 			pkCols = append(pkCols, col.Name)
 		}
@@ -522,15 +551,9 @@ func DeleteRow(tableName string, data map[string]string) (int64, error) {
 	if len(pkCols) == 0 {
 		return 0, fmt.Errorf("table '%s' has no primary key, cannot delete", tableName)
 	}
-	colMap := make(map[string]bool)
-	for _, col := range cols {
-		colMap[col.Name] = true
-	}
-	if len(data) == 0 {
-		return 0, fmt.Errorf("no data provided for deletion")
-	}
+	// 4. 构建 WHERE 子句和参数
 	var where []string
-	var args []any
+	params := make(map[string]any)
 	for _, pk := range pkCols {
 		if !IsValidIdentifier(pk) {
 			return 0, fmt.Errorf("invalid column name: %s", pk)
@@ -538,26 +561,26 @@ func DeleteRow(tableName string, data map[string]string) (int64, error) {
 		if !colMap[pk] {
 			return 0, fmt.Errorf("column '%s' does not exist in table '%s'", pk, tableName)
 		}
-		where = append(where, fmt.Sprintf(`"%s" = ?`, pk))
 		val, ok := data[pk]
 		if !ok {
 			return 0, fmt.Errorf("primary key column '%s' must be provided for deletion", pk)
 		}
-		args = append(args, val)
+		where = append(where, fmt.Sprintf(`"%s" = :pk_%s`, pk, pk))
+		params["pk_"+pk] = val
 	}
-	if len(where) == 0 {
-		return 0, fmt.Errorf("no valid primary key columns for deletion")
-	}
-	sql := fmt.Sprintf(
-		"DELETE FROM \"%s\" WHERE %s",
+
+	// 5. 执行删除
+	query := fmt.Sprintf(
+		`DELETE FROM "%s" WHERE %s`,
 		tableName,
 		strings.Join(where, " AND "),
 	)
-	// 执行删除
-	result, err := utils.DB.Exec(sql, args...)
+
+	result, err := utils.DB.NamedExec(query, params)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to execute delete: %w", err)
 	}
+
 	return result.RowsAffected()
 }
 
@@ -583,59 +606,43 @@ type QueryTableResult struct {
 }
 
 func GetTableData(tableName string, limit, offset int) (*QueryTableResult, error) {
-	// Count total
-	var total int
-	err := utils.DB.QueryRow("SELECT COUNT(*) FROM " + tableName).Scan(&total)
-	if err != nil {
-		return nil, err
+	result := &QueryTableResult{
+		Data: make([]map[string]any, 0),
+	}
+	// 使用命名参数，更清晰
+	query := `SELECT COUNT(*) FROM :table_name`
+	if err := utils.DB.Get(&result.Total, query, sql.Named("table_name", tableName)); err != nil {
+		return nil, fmt.Errorf("count failed: %w", err)
 	}
 
 	// Fetch data
-	rows, err := utils.DB.Query(
-		fmt.Sprintf("SELECT * FROM %s LIMIT %d OFFSET %d", tableName, limit, offset),
-	)
+	// 使用 BindMap 处理表名和分页参数
+	query = `SELECT * FROM :table_name LIMIT :limit OFFSET :offset`
+	rows, err := utils.DB.NamedQuery(query, map[string]any{
+		"table_name": tableName,
+		"limit":      limit,
+		"offset":     offset,
+	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query failed: %w", err)
 	}
 	defer rows.Close()
 
-	data, err := scanRows(rows)
-	if err != nil {
-		return nil, err
-	}
-
-	if data == nil {
-		data = []map[string]any{}
-	}
-
-	return &QueryTableResult{Data: data, Total: total}, nil
-}
-
-func scanRows(rows *sql.Rows) ([]map[string]any, error) {
-	columns, _ := rows.Columns()
-	var result []map[string]any
-
 	for rows.Next() {
-		values := make([]any, len(columns))
-		valuePointers := make([]any, len(columns))
-		for i := range values {
-			valuePointers[i] = &values[i]
+		row := make(map[string]any)
+		if err := rows.MapScan(row); err != nil {
+			return nil, fmt.Errorf("scan failed: %w", err)
 		}
-		if err := rows.Scan(valuePointers...); err != nil {
-			continue
-		}
-		entry := make(map[string]any)
-		for i, col := range columns {
-			val := values[i]
-			if b, ok := val.([]byte); ok {
-				entry[col] = string(b)
-			} else {
-				entry[col] = val
+		// 处理 []byte 类型
+		for k, v := range row {
+			if b, ok := v.([]byte); ok {
+				row[k] = string(b)
 			}
 		}
-		result = append(result, entry)
+		result.Data = append(result.Data, row)
 	}
-	return result, nil
+
+	return result, rows.Err()
 }
 
 // ParseJSON 解析为 []map[string]any
@@ -709,7 +716,8 @@ func ImportToTable(ctx context.Context, fileReader io.Reader, fileType, tableNam
 		FailedCount:  0,
 		Errors:       []string{},
 	}
-	tx, err := utils.DB.BeginTx(ctx, nil)
+	// 开启事务
+	tx, err := utils.DB.BeginTxx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -724,41 +732,30 @@ func ImportToTable(ctx context.Context, fileReader io.Reader, fileType, tableNam
 		}
 	}
 	if createNewColumn {
-		// 获取现有列
-		existingCols, err := GetTableColumns(tableName)
-		if err != nil {
-			return nil, err
-		}
-		existingColMap := make(map[string]bool)
-		for _, col := range existingCols {
-			existingColMap[col.Name] = true
-		}
-		// 创建不存在的列，全部使用 TEXT 类型
-		for _, col := range columns {
-			if !existingColMap[col] {
-				err := NewTableColumn(tableName, NewTableColumnSchema{
-					Name: col,
-					Type: "TEXT",
-				})
-				if err != nil {
-					result.Errors = append(result.Errors, fmt.Sprintf("创建列 %s 失败: %s", col, err.Error()))
-				}
-			}
+		if err := createNewColumns(tableName, columns); err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("创建新列失败: %s", err.Error()))
+			return result, err
 		}
 	}
+	// 构建 INSERT 语句
+	colNames := make([]string, len(columns))
+	colParams := make([]string, len(columns))
+	for i, col := range columns {
+		colNames[i] = fmt.Sprintf(`"%s"`, col)
+		colParams[i] = ":" + col
+	}
 
-	// 构建 INSERT SQL
-	// INSERT INTO table (a,b,c) VALUES (?, ?, ?)
-	placeholders := strings.Repeat("?,", len(columns)-1) + "?"
-	sqlStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", tableName, strings.Join(columns, ","), placeholders)
-	// 先尝试所有 INSERT，记录失败
-	var failed bool
+	query := fmt.Sprintf(
+		`INSERT INTO "%s" (%s) VALUES (%s)`,
+		tableName,
+		strings.Join(colNames, ","),
+		strings.Join(colParams, ","),
+	)
+
+	// 执行批量插入
+	failed := false
 	for _, record := range records {
-		values := make([]any, 0, len(columns))
-		for _, col := range columns {
-			values = append(values, record[col])
-		}
-		_, err := tx.ExecContext(ctx, sqlStmt, values...)
+		_, err := tx.NamedExecContext(ctx, query, record)
 		if err != nil {
 			result.FailedCount++
 			result.Errors = append(result.Errors, err.Error())
@@ -768,37 +765,70 @@ func ImportToTable(ctx context.Context, fileReader io.Reader, fileType, tableNam
 		}
 	}
 
-	// 只有全部成功才提交
+	// 提交或回滚事务
 	if !failed {
 		if err := tx.Commit(); err != nil {
-			return nil, fmt.Errorf("commit failed: %w", err)
+			return nil, fmt.Errorf("提交事务失败: %w", err)
 		}
 		return result, nil
 	}
 
-	// 显式回滚（虽然 defer 也会做，但更清晰）
-	if err := tx.Rollback(); err != nil {
-		// 可选：记录 rollback 错误
-	}
-	if failed {
-		return result, fmt.Errorf("部分数据导入失败，已回滚")
-	}
-	return result, nil
+	return result, fmt.Errorf("部分数据导入失败，已回滚")
+}
 
+// 辅助函数：创建新列
+func createNewColumns(tableName string, newColumns []string) error {
+	// 获取现有列
+	existingCols, err := GetTableColumns(tableName)
+	if err != nil {
+		return err
+	}
+
+	existingColMap := make(map[string]bool)
+	for _, col := range existingCols {
+		existingColMap[col.Name] = true
+	}
+
+	// 创建不存在的列
+	for _, col := range newColumns {
+		if !existingColMap[col] {
+			err := NewTableColumn(tableName, NewTableColumnSchema{
+				Name: col,
+				Type: "TEXT",
+			})
+			if err != nil {
+				return fmt.Errorf("创建列 %s 失败: %w", col, err)
+			}
+		}
+	}
+	return nil
 }
 
 // 导出表数据, 支持指定字段, 格式 JSON/CSV
 func StreamExportTableData(ctx context.Context, tableName string, columns []string, fileType string, w io.Writer) error {
-	// 构建查询：全量导出（或可加 where）
-	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(columns, ","), tableName)
-
-	rows, err := utils.DB.QueryContext(ctx, query)
+	// 参数验证
+	if !IsValidIdentifier(tableName) {
+		return fmt.Errorf("非法表名: %s", tableName)
+	}
+	for _, col := range columns {
+		if !IsValidIdentifier(col) {
+			return fmt.Errorf("非法列名: %s", col)
+		}
+	}
+	// 构建查询
+	query := fmt.Sprintf(
+		`SELECT %s FROM "%s"`,
+		strings.Join(quotedColumns(columns), ","),
+		tableName,
+	)
+	// 使用 sqlx 查询
+	rows, err := utils.DB.QueryxContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("查询失败: %w", err)
 	}
 	defer rows.Close()
 
-	// 根据格式初始化编码器
+	// 根据格式进行流式导出
 	switch fileType {
 	case "json":
 		return streamJSON(rows, columns, w)
@@ -809,32 +839,33 @@ func StreamExportTableData(ctx context.Context, tableName string, columns []stri
 	}
 }
 
-func streamJSON(rows *sql.Rows, columns []string, w io.Writer) error {
+// 使用 sqlx 优化的 JSON 流式导出
+func streamJSON(rows *sqlx.Rows, columns []string, w io.Writer) error {
 	if _, err := w.Write([]byte("[")); err != nil {
 		return err
 	}
 
-	var isFirst = true
+	isFirst := true
 	for rows.Next() {
-		vals := make([]any, len(columns))
-		valuePointers := make([]any, len(columns))
-		for i := range vals {
-			valuePointers[i] = &vals[i]
-		}
-
-		if err := rows.Scan(valuePointers...); err != nil {
-			return err
-		}
-
+		// 使用 MapScan 直接扫描到 map
 		row := make(map[string]any)
-		for i, col := range columns {
-			switch v := vals[i].(type) {
-			case nil:
-				row[col] = nil
+		if err := rows.MapScan(row); err != nil {
+			return fmt.Errorf("扫描行数据失败: %w", err)
+		}
+
+		// 处理特殊类型
+		for k, v := range row {
+			switch val := v.(type) {
 			case []byte:
-				row[col] = string(v) // 假设是 UTF-8 文本
-			default:
-				row[col] = v
+				row[k] = string(val)
+			}
+		}
+
+		// 只保留指定的列
+		result := make(map[string]any)
+		for _, col := range columns {
+			if v, ok := row[col]; ok {
+				result[col] = v
 			}
 		}
 
@@ -846,9 +877,9 @@ func streamJSON(rows *sql.Rows, columns []string, w io.Writer) error {
 		isFirst = false
 
 		encoder := json.NewEncoder(w)
-		encoder.SetEscapeHTML(false) // 可选
-		if err := encoder.Encode(row); err != nil {
-			return err
+		encoder.SetEscapeHTML(false)
+		if err := encoder.Encode(result); err != nil {
+			return fmt.Errorf("编码 JSON 失败: %w", err)
 		}
 	}
 
@@ -859,43 +890,55 @@ func streamJSON(rows *sql.Rows, columns []string, w io.Writer) error {
 	return rows.Err()
 }
 
-func streamCSV(rows *sql.Rows, columns []string, w io.Writer) error {
+// 使用 sqlx 优化的 CSV 流式导出
+func streamCSV(rows *sqlx.Rows, columns []string, w io.Writer) error {
 	writer := csv.NewWriter(w)
 	defer writer.Flush()
 
-	// 写表头
+	// 写入表头
 	if err := writer.Write(columns); err != nil {
-		return err
+		return fmt.Errorf("写入表头失败: %w", err)
 	}
 
-	// 写数据行
+	// 逐行处理数据
 	for rows.Next() {
-		vals := make([]any, len(columns))
-		valuePointers := make([]any, len(columns))
-		for i := range vals {
-			valuePointers[i] = &vals[i]
+		row := make(map[string]any)
+		if err := rows.MapScan(row); err != nil {
+			return fmt.Errorf("扫描行数据失败: %w", err)
 		}
 
-		if err := rows.Scan(valuePointers...); err != nil {
-			return err
-		}
-
+		// 按列顺序构建记录
 		record := make([]string, len(columns))
-		for i, v := range vals {
-			switch x := v.(type) {
+		for i, col := range columns {
+			v, exists := row[col]
+			if !exists {
+				record[i] = ""
+				continue
+			}
+
+			switch val := v.(type) {
 			case nil:
 				record[i] = ""
 			case []byte:
-				record[i] = string(x)
+				record[i] = string(val)
 			default:
-				record[i] = fmt.Sprintf("%v", x)
+				record[i] = fmt.Sprintf("%v", val)
 			}
 		}
 
 		if err := writer.Write(record); err != nil {
-			return err
+			return fmt.Errorf("写入数据行失败: %w", err)
 		}
 	}
 
 	return rows.Err()
+}
+
+// 辅助函数：给列名添加引号
+func quotedColumns(columns []string) []string {
+	quoted := make([]string, len(columns))
+	for i, col := range columns {
+		quoted[i] = fmt.Sprintf(`"%s"`, col)
+	}
+	return quoted
 }

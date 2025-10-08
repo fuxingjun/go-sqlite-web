@@ -18,6 +18,7 @@ import (
 
 	"github.com/fuxingjun/go-sqlite-web/app/models"
 	"github.com/fuxingjun/go-sqlite-web/app/utils"
+	"github.com/jmoiron/sqlx"
 )
 
 type DBInfo struct {
@@ -90,11 +91,15 @@ func GetDBInfo() (*DBInfo, error) {
 	path := utils.DBPath // 假设你在 db/connection.go 中保存了原始路径
 	fi, err := os.Stat(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("获取文件信息失败: %w", err)
 	}
 
+	// 使用 sqlx.Get 简化版本查询
 	var sqliteVer string
-	_ = utils.DB.QueryRow("SELECT sqlite_version()").Scan(&sqliteVer)
+	err = utils.DB.Get(&sqliteVer, "SELECT sqlite_version()")
+	if err != nil {
+		return nil, fmt.Errorf("获取 SQLite 版本失败: %w", err)
+	}
 
 	ctime, _ := GetFileCreationTime(path)
 
@@ -107,107 +112,123 @@ func GetDBInfo() (*DBInfo, error) {
 	}, nil
 }
 
-func GetTables() ([]string, error) {
-	rows, err := utils.DB.Query(`
-		SELECT name FROM sqlite_master
-		WHERE type='table' AND name NOT LIKE 'sqlite_%'
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var tables = make([]string, 0)
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			continue
-		}
-		tables = append(tables, name)
-	}
-
-	return tables, nil
+type tableInfo struct {
+	Name string `db:"name"`
 }
 
+func GetTables() ([]string, error) {
+	// 使用 sqlx.Select 直接将结果映射到结构体切片
+	var tables []tableInfo
+	err := utils.DB.Select(&tables, `
+        SELECT name 
+        FROM sqlite_master 
+        WHERE type='table' 
+          AND name NOT LIKE 'sqlite_%'
+    `)
+	if err != nil {
+		return nil, fmt.Errorf("获取表信息失败: %w", err)
+	}
+
+	// 提取表名
+	result := make([]string, len(tables))
+	for i, t := range tables {
+		result[i] = t.Name
+	}
+
+	return result, nil
+}
+
+// View 结构添加 db 标签
 type View struct {
-	Name string `json:"name"`
-	SQL  string `json:"sql"`
+	Name string `db:"name" json:"name"`
+	SQL  string `db:"sql" json:"sql"`
 }
 
 func GetViews() (*[]View, error) {
-	rows, err := utils.DB.Query(`
-		SELECT name, sql FROM sqlite_master WHERE type='view'
-	`)
+	var views []View
+	err := utils.DB.Select(&views, `
+        SELECT name, sql 
+        FROM sqlite_master 
+        WHERE type='view'
+        ORDER BY name
+    `)
 	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	views := make([]View, 0)
-	for rows.Next() {
-		var v View
-		if err := rows.Scan(&v.Name, &v.SQL); err != nil {
-			continue
-		}
-		views = append(views, v)
+		return nil, fmt.Errorf("获取视图失败: %w", err)
 	}
 	return &views, nil
+}
+
+// triggerSchema 用于映射 sqlite_master 表中的触发器数据
+type triggerSchemaItem struct {
+	Name      string `db:"name"`
+	TableName string `db:"table_name"`
+	SQL       string `db:"sql"`
 }
 
 // GetAllTriggers 查询所有触发器
 func GetAllTriggers() ([]*models.Trigger, error) {
 	query := `
-        SELECT 
-            name,
-            tbl_name AS table_name,
-            sql
-        FROM sqlite_master 
-        WHERE type = 'trigger'
-          AND name NOT LIKE 'sqlite_%'
-        ORDER BY name
-    `
-	rows, err := utils.DB.Query(query)
-	if err != nil {
-		return nil, err
+			SELECT 
+					name,
+					tbl_name AS table_name,
+					sql
+			FROM sqlite_master 
+			WHERE type = 'trigger'
+				AND name NOT LIKE 'sqlite_%'
+			ORDER BY name
+	`
+	var schemas []triggerSchemaItem
+	if err := utils.DB.Select(&schemas, query); err != nil {
+		return nil, fmt.Errorf("获取触发器失败: %w", err)
 	}
-	defer rows.Close()
-	triggers := make([]*models.Trigger, 0)
-	for rows.Next() {
-		var name, table, sql string
-		if err := rows.Scan(&name, &table, &sql); err != nil {
-			return nil, err
-		}
+
+	// 转换为业务模型
+	triggers := make([]*models.Trigger, len(schemas))
+	for i, s := range schemas {
 		trigger := &models.Trigger{
-			Name:       name,
-			Table:      table,
-			Definition: formatTriggerDefinition(sql),
-			SQL:        sql,
+			Name:       s.Name,
+			Table:      s.TableName,
+			Definition: formatTriggerDefinition(s.SQL),
+			SQL:        s.SQL,
 		}
-		// 解析类型和时机（INSERT/UPDATE/DELETE, BEFORE/AFTER）
-		trigger.Type, trigger.Timing = parseTriggerTypeTiming(sql)
-		triggers = append(triggers, trigger)
+		// 解析类型和时机
+		trigger.Type, trigger.Timing = parseTriggerTypeTiming(s.SQL)
+		triggers[i] = trigger
 	}
+
 	return triggers, nil
+}
+
+// triggerDetailSchema 用于映射单个触发器的查询结果
+type triggerDetailSchema struct {
+	TableName string `db:"tbl_name"`
+	SQL       string `db:"sql"`
 }
 
 // GetTriggerByName 查询指定触发器
 func GetTriggerByName(name string) (*models.Trigger, error) {
-	var table, sqlStr string
+	if !IsValidIdentifier(name) {
+		return nil, fmt.Errorf("非法触发器名称: %s", name)
+	}
+
+	var schema triggerDetailSchema
 	query := `SELECT tbl_name, sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`
-	err := utils.DB.QueryRow(query, name).Scan(&table, &sqlStr)
+	err := utils.DB.Get(&schema, query, name)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("trigger not found: %s", name)
+			return nil, fmt.Errorf("触发器不存在: %s", name)
 		}
-		return nil, err
+		return nil, fmt.Errorf("查询触发器失败: %w", err)
 	}
+
 	trigger := &models.Trigger{
 		Name:       name,
-		Table:      table,
-		SQL:        sqlStr,
-		Definition: formatTriggerDefinition(sqlStr),
+		Table:      schema.TableName,
+		SQL:        schema.SQL,
+		Definition: formatTriggerDefinition(schema.SQL),
 	}
-	trigger.Type, trigger.Timing = parseTriggerTypeTiming(sqlStr)
+	trigger.Type, trigger.Timing = parseTriggerTypeTiming(schema.SQL)
+
 	return trigger, nil
 }
 
@@ -260,22 +281,28 @@ type SQLResult struct {
 	Error        string           `json:"error,omitempty"`        // 错误信息
 }
 
-var (
-	selectRe = regexp.MustCompile(`(?i)^\s*SELECT\s+`)
-	insertRe = regexp.MustCompile(`(?i)^\s*INSERT\s+`)
-	updateRe = regexp.MustCompile(`(?i)^\s*UPDATE\s+`)
-	deleteRe = regexp.MustCompile(`(?i)^\s*DELETE\s+`)
-)
+// SQL 语句类型正则表达式
+var sqlPatterns = struct {
+	selectStmt *regexp.Regexp
+	insertStmt *regexp.Regexp
+	updateStmt *regexp.Regexp
+	deleteStmt *regexp.Regexp
+}{
+	selectStmt: regexp.MustCompile(`(?i)^\s*SELECT\s+`),
+	insertStmt: regexp.MustCompile(`(?i)^\s*INSERT\s+`),
+	updateStmt: regexp.MustCompile(`(?i)^\s*UPDATE\s+`),
+	deleteStmt: regexp.MustCompile(`(?i)^\s*DELETE\s+`),
+}
 
 func classifySQL(sql string) string {
 	switch {
-	case selectRe.MatchString(sql):
+	case sqlPatterns.selectStmt.MatchString(sql):
 		return "SELECT"
-	case insertRe.MatchString(sql):
+	case sqlPatterns.insertStmt.MatchString(sql):
 		return "INSERT"
-	case updateRe.MatchString(sql):
+	case sqlPatterns.updateStmt.MatchString(sql):
 		return "UPDATE"
-	case deleteRe.MatchString(sql):
+	case sqlPatterns.deleteStmt.MatchString(sql):
 		return "DELETE"
 	default:
 		return "EXEC"
@@ -376,21 +403,19 @@ func executeSelect(sqlStr string, page, size int, start time.Time) *SQLResult {
 		}
 	}
 
-	// 1. 获取总数（尝试包装子查询）
-	total, err := getCount(sqlStr)
-	if err != nil {
-		result.Error = fmt.Sprintf("get count failed: %v", err)
-		// 不中断，继续执行查询
-	} else {
+	// 获取总数
+	if total, err := getCount(sqlStr); err == nil {
 		result.Total = total
 	}
+
+	// 构建分页 SQL
 	sqlStr = strings.TrimRight(sqlStr, ";")
-	// 增加分页查询
 	offset := (result.Page - 1) * result.Size
 	paginatedSQL := fmt.Sprintf("%s LIMIT %d OFFSET %d", sqlStr, result.Size+1, offset)
 
 	utils.GetLogger("").Debug("Executing paginated SQL", "sql", paginatedSQL)
-	rows, err := utils.DB.Query(paginatedSQL)
+	// 执行查询
+	rows, err := utils.DB.Queryx(paginatedSQL)
 	if err != nil {
 		result.Error = fmt.Sprintf("execute failed: %v", err)
 		return result
@@ -398,28 +423,29 @@ func executeSelect(sqlStr string, page, size int, start time.Time) *SQLResult {
 	defer rows.Close()
 
 	// 获取列名
-	cols, err := rows.Columns()
-	if err != nil {
+	if cols, err := rows.Columns(); err == nil {
+		result.Columns = cols
+	} else {
 		result.Error = fmt.Sprintf("get columns failed: %v", err)
 		return result
 	}
-	result.Columns = cols
 
-	// 扫描数据
+	// 使用 MapScan 扫描数据
 	rowCount := 0
 	for rows.Next() && rowCount <= result.Size {
-		values, err := scanRow(rows, cols)
-		if err != nil {
+		row := make(map[string]any)
+		if err := rows.MapScan(row); err != nil {
 			utils.GetLogger("").Error("scan row failed", "error", err)
 			continue
 		}
-		result.Rows = append(result.Rows, values)
+		// 处理 []byte 类型
+		for k, v := range row {
+			if b, ok := v.([]byte); ok {
+				row[k] = string(b)
+			}
+		}
+		result.Rows = append(result.Rows, row)
 		rowCount++
-	}
-
-	if err = rows.Err(); err != nil {
-		result.Error = fmt.Sprintf("handle row failed: %v", err)
-		return result
 	}
 
 	result.HasNext = rowCount > result.Size
@@ -477,21 +503,17 @@ func cleanSQL(sql string) string {
 func getCount(sql string) (int64, error) {
 	if hasPagination(sql) {
 		// 去掉 LIMIT 和 OFFSET
-		limitRe := regexp.MustCompile(`(?i)\s+LIMIT\s+\d+`)
-		offsetRe := regexp.MustCompile(`(?i)\s+OFFSET\s+\d+`)
-		sql = limitRe.ReplaceAllString(sql, "")
-		sql = offsetRe.ReplaceAllString(sql, "")
+		sql = regexp.MustCompile(`(?i)\s+LIMIT\s+\d+`).ReplaceAllString(sql, "")
+		sql = regexp.MustCompile(`(?i)\s+OFFSET\s+\d+`).ReplaceAllString(sql, "")
 		sql = strings.TrimSpace(sql)
 	}
 	// 去掉封号
 	sql = strings.TrimRight(sql, ";")
-	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _count", sql)
+	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _count", strings.TrimRight(sql, ";"))
 	utils.GetLogger("").Debug("Count SQL", "sql", countSQL)
 	var total int64
-	err := utils.DB.QueryRow(countSQL).Scan(&total)
-	if err != nil {
-		// 可能因子查询含 LIMIT 失败，尝试其他方式或返回 -1
-		return -1, err
+	if err := utils.DB.Get(&total, countSQL); err != nil {
+		return -1, fmt.Errorf("count failed: %w", err)
 	}
 	return total, nil
 }
@@ -499,37 +521,16 @@ func getCount(sql string) (int64, error) {
 // getColumnsFromQuery 获取查询的列名
 // 方法：执行一次干跑（带 LIMIT 0）
 func getColumnsFromQuery(sqlStr string) ([]string, error) {
-	rows, err := utils.DB.Query(fmt.Sprintf("SELECT * FROM (%s) AS t LIMIT 0", sqlStr))
+	rows, err := utils.DB.Queryx(fmt.Sprintf("SELECT * FROM (%s) AS t LIMIT 0", sqlStr))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dry run failed: %w", err)
 	}
 	defer rows.Close()
-	return rows.Columns()
-}
-
-// scanRow 将一行数据扫描为 map[string]any
-func scanRow(rows *sql.Rows, columns []string) (map[string]any, error) {
-	values := make([]any, len(columns))
-	valuePointers := make([]any, len(columns))
-	for i := range values {
-		valuePointers[i] = &values[i]
-	}
-	err := rows.Scan(valuePointers...)
+	cols, err := rows.Columns()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get columns failed: %w", err)
 	}
-	row := make(map[string]any)
-	for i, col := range columns {
-		val := values[i]
-		// 处理 []byte -> string (如 BLOB)
-		if b, ok := val.([]byte); ok {
-			// 尝试转为字符串，避免显示为 base64
-			row[col] = string(b)
-		} else {
-			row[col] = val
-		}
-	}
-	return row, nil
+	return cols, nil
 }
 
 // CreateSQLiteTable 根据请求创建表
@@ -541,8 +542,8 @@ func CreateSQLiteTable(req *models.CreateTableRequest) error {
 
 	// Step 1: 检查表是否已存在
 	var exists bool
-	query := `SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name=? AND tbl_name=?)`
-	err := utils.DB.QueryRow(query, req.TableName, req.TableName).Scan(&exists)
+	query := `SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)`
+	err := utils.DB.Get(&exists, query, req.TableName)
 	if err != nil {
 		return fmt.Errorf("failed to check if table exists: %w", err)
 	}
@@ -575,16 +576,19 @@ func ExportQuery(sql string, page, size int, fileType string, w io.Writer) error
 	// 获取列名（通过 EXPLAIN QUERY PLAN 或干跑查询）
 	cols, err := getColumnsFromQuery(sql)
 	if err != nil {
-		return err
+		return fmt.Errorf("获取列名失败: %w", err)
 	}
 	// 构造分页查询
 	offset := (page - 1) * size
 	paginatedSQL := fmt.Sprintf("%s LIMIT %d OFFSET %d", sql, size+1, offset)
-	rows, err := utils.DB.Query(paginatedSQL)
 
+	// 使用 sqlx 查询
+	rows, err := utils.DB.Queryx(paginatedSQL)
 	if err != nil {
-		return err
+		return fmt.Errorf("执行查询失败: %w", err)
 	}
+	defer rows.Close()
+
 	switch fileType {
 	case "json":
 		return ExportToJSON(cols, rows, w)
@@ -596,34 +600,31 @@ func ExportQuery(sql string, page, size int, fileType string, w io.Writer) error
 }
 
 // 数据导出为 JSON
-func ExportToJSON(columns []string, rows *sql.Rows, w io.Writer) error {
-	encoder := json.NewEncoder(w)
-	encoder.SetEscapeHTML(false)
-
+func ExportToJSON(columns []string, rows *sqlx.Rows, w io.Writer) error {
 	if _, err := w.Write([]byte("[")); err != nil {
 		return err
 	}
 
 	first := true
-	values := make([]any, len(columns))
-	valuePointers := make([]any, len(columns))
-	for i := range values {
-		valuePointers[i] = &values[i]
-	}
-
 	for rows.Next() {
-		if err := rows.Scan(valuePointers...); err != nil {
+		// 使用 MapScan 直接扫描到 map
+		row := make(map[string]any)
+		if err := rows.MapScan(row); err != nil {
 			return fmt.Errorf("读取数据失败: %w", err)
 		}
 
-		// 转 map[string]any
-		row := make(map[string]any, len(columns))
-		for i, col := range columns {
-			v := values[i]
+		// 处理特殊类型
+		for k, v := range row {
 			if b, ok := v.([]byte); ok {
-				row[col] = string(b) // 转 string 避免 []uint8
-			} else {
-				row[col] = v
+				row[k] = string(b)
+			}
+		}
+
+		// 只保留指定的列
+		result := make(map[string]any)
+		for _, col := range columns {
+			if v, ok := row[col]; ok {
+				result[col] = v
 			}
 		}
 
@@ -634,17 +635,8 @@ func ExportToJSON(columns []string, rows *sql.Rows, w io.Writer) error {
 		}
 		first = false
 
-		data, err := json.Marshal(row)
-		if err != nil {
+		if err := json.NewEncoder(w).Encode(result); err != nil {
 			return fmt.Errorf("序列化行失败: %w", err)
-		}
-		// 去掉末尾 \n
-		if len(data) > 0 && data[len(data)-1] == '\n' {
-			data = data[:len(data)-1]
-		}
-		_, err = w.Write(data)
-		if err != nil {
-			return fmt.Errorf("写入行失败: %w", err)
 		}
 	}
 
@@ -652,15 +644,11 @@ func ExportToJSON(columns []string, rows *sql.Rows, w io.Writer) error {
 		return err
 	}
 
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("遍历结果时出错: %w", err)
-	}
-
-	return nil
+	return rows.Err()
 }
 
 // 数据导出为 CSV
-func ExportToCSV(columns []string, rows *sql.Rows, w io.Writer) error {
+func ExportToCSV(columns []string, rows *sqlx.Rows, w io.Writer) error {
 	writer := csv.NewWriter(w)
 	defer writer.Flush()
 
@@ -674,43 +662,23 @@ func ExportToCSV(columns []string, rows *sql.Rows, w io.Writer) error {
 		return fmt.Errorf("写入表头失败: %w", err)
 	}
 
-	// 预分配 record 缓冲区
-	record := make([]string, len(columns))
-
-	// 值指针（复用）
-	values := make([]any, len(columns))
-	valuePointers := make([]any, len(columns))
-	for i := range valuePointers {
-		valuePointers[i] = &values[i]
-	}
-
+	// 逐行处理数据
 	for rows.Next() {
-		if err := rows.Scan(valuePointers...); err != nil {
+		row := make(map[string]any)
+		if err := rows.MapScan(row); err != nil {
 			return fmt.Errorf("读取数据失败: %w", err)
 		}
 
-		// 转换每一列
-		for i, v := range values {
-			switch val := v.(type) {
-			case nil:
+		// 按列顺序构建记录
+		record := make([]string, len(columns))
+		for i, col := range columns {
+			v, exists := row[col]
+			if !exists {
 				record[i] = ""
-			case []byte:
-				record[i] = string(val)
-			case string:
-				record[i] = val
-			case int64:
-				record[i] = strconv.FormatInt(val, 10)
-			case int:
-				record[i] = strconv.FormatInt(int64(val), 10)
-			case float64:
-				record[i] = strconv.FormatFloat(val, 'g', -1, 64)
-			case bool:
-				record[i] = strconv.FormatBool(val)
-			case time.Time:
-				record[i] = val.Format("2006-01-02 15:04:05")
-			default:
-				record[i] = fmt.Sprintf("%v", val)
+				continue
 			}
+
+			record[i] = formatValue(v)
 		}
 
 		if err := writer.Write(record); err != nil {
@@ -718,13 +686,27 @@ func ExportToCSV(columns []string, rows *sql.Rows, w io.Writer) error {
 		}
 	}
 
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("遍历结果时出错: %w", err)
-	}
+	return rows.Err()
+}
 
-	if err := writer.Error(); err != nil {
-		return fmt.Errorf("CSV刷新失败: %w", err)
+// 辅助函数：格式化值为字符串
+func formatValue(v any) string {
+	switch val := v.(type) {
+	case nil:
+		return ""
+	case []byte:
+		return string(val)
+	case string:
+		return val
+	case int64:
+		return strconv.FormatInt(val, 10)
+	case float64:
+		return strconv.FormatFloat(val, 'g', -1, 64)
+	case bool:
+		return strconv.FormatBool(val)
+	case time.Time:
+		return val.Format("2006-01-02 15:04:05")
+	default:
+		return fmt.Sprintf("%v", val)
 	}
-
-	return nil
 }

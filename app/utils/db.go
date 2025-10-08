@@ -1,13 +1,15 @@
 package utils
 
 import (
-	"database/sql"
+	"fmt"
 	"strings"
+
+	"github.com/jmoiron/sqlx"
 
 	_ "modernc.org/sqlite"
 )
 
-var DB *sql.DB
+var DB *sqlx.DB
 var DBPath string
 
 func Connect(path string, readOnly bool) error {
@@ -15,11 +17,12 @@ func Connect(path string, readOnly bool) error {
 	if readOnly {
 		mode = "?mode=ro"
 	}
-	db, err := sql.Open("sqlite", path+mode)
+	dsn := fmt.Sprintf("file:%s%s", path, mode)
+	instance, err := sqlx.Connect("sqlite", dsn)
 	if err != nil {
 		return err
 	}
-	DB = db
+	DB = instance
 	DBPath = path
 	return nil
 }
