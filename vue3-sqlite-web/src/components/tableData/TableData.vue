@@ -10,17 +10,17 @@
         Refresh
       </n-button>
       &nbsp;
-      <n-button size="small" type="primary" @click="handleNewRow" v-if="columns.length > 0">
-        <template #icon>
-          <n-icon>
-            <Add />
-          </n-icon>
-        </template>
-        Add
-      </n-button>
-      &nbsp;
-      <n-upload v-model:file-list="fileList" :custom-request="handleImport" accept=".json,.csv" :max="1" :show-file-list="false" style="flex: 0;">
-        <n-button size="small" type="info">
+      <template v-if="columns.length > 0">
+        <n-button size="small" type="primary" @click="handleNewRow">
+          <template #icon>
+            <n-icon>
+              <Add />
+            </n-icon>
+          </template>
+          Add
+        </n-button>
+        &nbsp;
+        <n-button size="small" type="info" @click="handleImport">
           <template #icon>
             <n-icon>
               <CloudUploadOutline />
@@ -28,8 +28,8 @@
           </template>
           Import
         </n-button>
-      </n-upload>
-      &nbsp;
+        &nbsp;
+      </template>
       <n-button size="small" type="primary" @click="handleExport">
         <template #icon>
           <n-icon>
@@ -44,6 +44,8 @@
     <NewRowModal ref="newRowModalRef" @confirm="getTableData" />
 
     <ExportDataModal ref="exportDataModalRef" />
+
+    <ImportDataModal ref="importDataModalRef" />
   </div>
 </template>
 
@@ -54,6 +56,7 @@ import { Add, Refresh, CloudDownloadOutline, CloudUploadOutline } from '@vicons/
 import { getTableDataRequest, listColumnsRequest, importTableDataRequest, deleteTableRowRequest } from '@/services'
 import NewRowModal from './NewRowModal.vue';
 import ExportDataModal from './ExportDataModal.vue';
+import ImportDataModal from './ImportDataModal.vue';
 
 const message = useMessage()
 
@@ -176,33 +179,30 @@ onMounted(() => {
 const newRowModalRef = ref(null)
 
 function handleNewRow() {
-  newRowModalRef.value.setVisible(true, "New", { name: props.table, columns: columns.value });
+  const params = {
+    name: props.table,
+    columns: columns.value
+  }
+  newRowModalRef.value.setVisible(true, "New", params);
 }
 
-const fileList = ref([])
+const importDataModalRef = ref(null)
 
-function handleImport({ file }) {
-  const formData = new FormData()
-  formData.append('file', file.file)
-  formData.append('createNewColumn', true)
-
-  const messageReactive = message.loading('Importing...', {
-    duration: 0,
-  });
-  importTableDataRequest(props.table, formData).then(({ data }) => {
-    const msg = `${data.SuccessCount} rows imported successfully, ${data.FailedCount} rows failed.`;
-    getTableData();
-    message.success(msg);
-  }).finally(() => {
-    messageReactive.destroy();
-    fileList.value = [];
-  });
+function handleImport() {
+  const params = {
+    name: props.table
+  }
+  importDataModalRef.value.setVisible(true, params);
 }
 
 const exportDataModalRef = ref(null)
 
 function handleExport() {
-  exportDataModalRef.value.setVisible(true, { name: props.table, columns: columns.value });
+  const params = {
+    name: props.table,
+    columns: columns.value
+  }
+  exportDataModalRef.value.setVisible(true, params);
 }
 
 </script>
