@@ -694,8 +694,8 @@ type ImportResult struct {
 	Errors       []string
 }
 
-// 上传文件导入数据JSON/CSV, 支持创建新列
-func ImportToTable(ctx context.Context, fileReader io.Reader, fileType, tableName string, createNewColumn bool) (*ImportResult, error) {
+// 上传文件导入数据JSON/CSV, 支持创建新列, 支持回滚控制
+func ImportToTable(ctx context.Context, fileReader io.Reader, fileType, tableName string, createNewColumn, rollback bool) (*ImportResult, error) {
 	if !IsValidIdentifier(tableName) {
 		return nil, fmt.Errorf("非法表名: %s", tableName)
 	}
@@ -717,7 +717,13 @@ func ImportToTable(ctx context.Context, fileReader io.Reader, fileType, tableNam
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	// 仅在未显式提交/回滚时兜底回滚
+	closed := false
+	defer func() {
+		if !closed {
+			_ = tx.Rollback()
+		}
+	}()
 	// 提取所有列名（取第一条记录的 key）
 	var columns []string
 	for k := range records[0] {
@@ -755,21 +761,39 @@ func ImportToTable(ctx context.Context, fileReader io.Reader, fileType, tableNam
 		if err != nil {
 			result.FailedCount++
 			result.Errors = append(result.Errors, err.Error())
+			// 限制一下error长度
+			if len(result.Errors) > 5 {
+				result.Errors = result.Errors[:5]
+			}
 			failed = true
 		} else {
 			result.SuccessCount++
 		}
 	}
 
-	// 提交或回滚事务
-	if !failed {
-		if err := tx.Commit(); err != nil {
-			return nil, fmt.Errorf("提交事务失败: %w", err)
+	// 提交或回滚事务（由 rollback 参数控制）
+	if failed {
+		if rollback {
+			if err := tx.Rollback(); err != nil {
+				return result, fmt.Errorf("回滚事务失败: %w", err)
+			}
+			closed = true
+			return result, fmt.Errorf("部分数据导入失败，已回滚")
 		}
+		// 不回滚：提交已成功的行
+		if err := tx.Commit(); err != nil {
+			return result, fmt.Errorf("提交事务失败: %w", err)
+		}
+		closed = true
+		// 返回结果但不作为错误抛出，由调用方依据 FailedCount/Errors 展示
 		return result, nil
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("提交事务失败: %w", err)
+	}
+	closed = true
 
-	return result, fmt.Errorf("部分数据导入失败，已回滚")
+	return result, fmt.Errorf("全部导入成功")
 }
 
 // 辅助函数：创建新列

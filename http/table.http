@@ -93,6 +93,10 @@ Content-Disposition: form-data; name="createNewColumn"
 
 true
 ------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="rollback"
+
+false
+------WebKitFormBoundary7MA4YWxkTrZu0gW
 Content-Disposition: form-data; name="file"; filename="users.csv"
 Content-Type: text/csv
 

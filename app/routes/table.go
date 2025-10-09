@@ -225,12 +225,14 @@ func TableRoute(router fiber.Router) {
 		}
 		defer fileReader.Close()
 		createNewColumn := c.FormValue("createNewColumn", "true") != "false"
+		rollback := c.FormValue("rollback", "false") == "true"
 		result, err := services.ImportToTable(
 			c.Context(),
 			fileReader,
 			ext,
 			tableName,
 			createNewColumn,
+			rollback,
 		)
 		if err != nil {
 			return c.JSON(models.ErrWithData(err.Error(), result))

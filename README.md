@@ -16,6 +16,7 @@ go_sqlite_web_windows_amd64.exe -db test.sqlite -port 12249 -debug
 ```
 
 ### TODO
+- [x] 导入回滚参数控制
 - [ ] 权限认证
 - [ ] readonly 模式
 - [ ] 跨平台测试
