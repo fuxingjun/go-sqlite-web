@@ -609,20 +609,16 @@ func GetTableData(tableName string, limit, offset int) (*QueryTableResult, error
 	result := &QueryTableResult{
 		Data: make([]map[string]any, 0),
 	}
-	// 使用命名参数，更清晰
-	query := `SELECT COUNT(*) FROM :table_name`
-	if err := utils.DB.Get(&result.Total, query, sql.Named("table_name", tableName)); err != nil {
+	// 统计总数：标识符不能参数化，需拼接
+	countSQL := fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, tableName)
+	if err := utils.DB.Get(&result.Total, countSQL); err != nil {
 		return nil, fmt.Errorf("count failed: %w", err)
 	}
 
 	// Fetch data
-	// 使用 BindMap 处理表名和分页参数
-	query = `SELECT * FROM :table_name LIMIT :limit OFFSET :offset`
-	rows, err := utils.DB.NamedQuery(query, map[string]any{
-		"table_name": tableName,
-		"limit":      limit,
-		"offset":     offset,
-	})
+	// 查询数据：表名拼接，limit/offset 用参数绑定
+	dataSQL := fmt.Sprintf(`SELECT * FROM "%s" LIMIT ? OFFSET ?`, tableName)
+	rows, err := utils.DB.Queryx(dataSQL, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("query failed: %w", err)
 	}
